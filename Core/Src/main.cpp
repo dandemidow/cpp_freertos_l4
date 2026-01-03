@@ -6,7 +6,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2024 STMicroelectronics.
+  * Copyright (c) 2025 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -18,10 +18,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,8 +43,11 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+RTC_HandleTypeDef hrtc;
+
 UART_HandleTypeDef huart2;
 
+osThreadId defaultTaskHandle;
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -50,13 +56,124 @@ UART_HandleTypeDef huart2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_RTC_Init(void);
+void StartDefaultTask(void const * argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/**/
+#if 1
+extern "C"
+long long unsigned int __atomic_load_8(const volatile void *addr, int order) {
+	(void)(order);
+	if (addr) {
+		return *(long long unsigned int*)addr;
+	}
+	return 0U;
+}
+extern "C"
+long long unsigned int __atomic_fetch_add_8(volatile void* addr, long long unsigned int obj, int order) {
+	if (addr) {
+		long long unsigned int const tmp{*(long long unsigned int*)addr + obj};
+		*(long long unsigned int*)addr = tmp;
+		return tmp;
+	}
+	return 0U;
+}
+#endif
+#if 1
+void* operator new  ( std::size_t count ) {
+    void *p = pvPortMalloc(count);
+//	void *p = malloc(count);
+	return p;
+}
+void operator delete(void *p, std::size_t count) {
+	(void)(count);
+	vPortFree(p);
+//	free(p);
+}
+#endif
+/**/
 
+struct Data {
+	uint32_t x;
+	uint32_t y;
+};
+
+std::mutex cv_mtx {};
+std::condition_variable cv;
+std::timed_mutex mytimedmutex {};
+bool ready = false;
+
+void firstThread(std::stop_token stop_token, std::mutex &mtx, Data &data) {
+	{
+	    std::lock_guard lk{cv_mtx};
+	    ready = true;
+	}
+	cv.notify_one();
+	while (!stop_token.stop_requested()) {
+		{
+		std::lock_guard<std::mutex> lock{mtx};
+		data.x++;
+		osDelay(10);
+		data.y++;
+		}
+	    osDelay(100);
+	}
+}
+
+void secondThread(std::stop_token stop_token, std::mutex &mtx, Data &data) {
+    while (!stop_token.stop_requested()) {
+        //std::this_thread::sleep_for(200ms);
+    	{
+    		std::lock_guard<std::mutex> lock{mtx};
+    		if (data.x != data.y) {
+    			Error_Handler();
+    			std::abort();
+    		}
+    	}
+    	osDelay(100);
+    }
+}
+
+void MainThread() {
+	Data data {};
+	std::mutex mtx {};
+	std::stop_source stop{};
+
+	size_t stack_inuse[] = {sizeof(data), sizeof(mtx), sizeof(stop), sizeof(std::thread)};
+	size_t heap = xPortGetFreeHeapSize();
+//	mytimedmutex.lock();
+
+	std::thread def_thread {StartDefaultTask, nullptr};
+
+	static std::thread first {firstThread, stop.get_token(), std::ref(mtx), std::ref(data)};
+	static std::thread second {secondThread, stop.get_token(), std::ref(mtx), std::ref(data)};
+
+	[[maybe_unused]] int stack = uxTaskGetStackHighWaterMark(NULL);
+
+//	std::atomic<int32_t> sync {};
+	std::unique_lock lk{cv_mtx};
+	cv.wait(lk, []{ return ready; });
+
+//	sync.store(100);
+	while ( data.x < 3 ) {
+		osDelay(100);
+	}
+	stop.request_stop();
+	first.join();
+	second.join();
+	data.x = 0;
+	data.y = 0;
+	while ( 1 ) {
+		osDelay(100);
+	}
+//	sync.load();
+}
 /* USER CODE END 0 */
 
 /**
@@ -89,13 +206,59 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
 
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* definition and creation of defaultTask */
+  //osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
+  //defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  RTC_DateTypeDef rtcDate {};
+  RTC_TimeTypeDef rtcTime {};
+  rtcDate.Year = 0;
+  rtcDate.Month = 3;
+  rtcDate.Date = 31;
+  rtcDate.WeekDay = 1;
+  rtcTime.Hours = 10;
+  rtcTime.Minutes = 30;
+  rtcTime.Seconds = 42;
+  HAL_RTC_SetTime(&hrtc, &rtcTime, RTC_FORMAT_BIN);
+  HAL_RTC_SetDate(&hrtc, &rtcDate, RTC_FORMAT_BIN);
+  auto t = time(NULL);
+  static std::thread main_thread {MainThread};
+
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+  std::abort();
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
+//  while (1)
   {
     /* USER CODE END WHILE */
 
@@ -123,9 +286,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = 64;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 1;
@@ -151,6 +315,42 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
 }
 
 /**
@@ -228,6 +428,49 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void const * argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  bool locked = mytimedmutex.try_lock_for(std::chrono::milliseconds(100));
+  for(;;)
+  {
+	  if(locked)osDelay(100);
+    osDelay(100);
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6) {
+    HAL_IncTick();
+    //xPortSysTickHandler();
+//    osSystickHandler();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

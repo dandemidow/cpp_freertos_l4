@@ -1,0 +1,3 @@
+[submodule "cpp_freertos"]
+	path = cpp_freertos
+	url = git@github.com:dandemidow/cpp_freertos.git
